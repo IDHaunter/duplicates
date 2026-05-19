@@ -78,6 +78,7 @@ index.set_ef(50)
 # 5. Finding Nearest Neighbors
 # =========================================================
 
+# How many nearest neighbors to search for
 K = 3
 
 labels, distances = index.knn_query(

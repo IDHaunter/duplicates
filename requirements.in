@@ -1,3 +1,4 @@
 pandas
 hnswlib
 sentence_transformers
+unidecode
