@@ -3,38 +3,249 @@ import unicodedata
 from unidecode import unidecode
 
 
+# =========================================================
+# Common company/legal suffixes
+# =========================================================
+
+COMPANY_SUFFIXES = {
+
+    # English
+    "llc",
+    "ltd",
+    "inc",
+    "corp",
+    "corporation",
+    "company",
+    "co",
+
+    # German
+    "gmbh",
+    "ag",
+
+    # Scandinavian
+    "as",
+    "ab",
+    "oy",
+
+    # Polish
+    "sp",
+    "z",
+    "oo",
+    "zoo",
+    "sa",
+
+    # French
+    "sarl",
+    "sas",
+
+    # Dutch
+    "bv",
+    "nv",
+
+    # Italian
+    "srl",
+
+    # Spanish / Portuguese
+    "sl",
+    "lda",
+
+    # Russian / CIS transliterated
+    "ooo",
+    "zao",
+    "oao",
+    "ao",
+
+    # Generic
+    "holding",
+    "group"
+}
+
+
+# =========================================================
+# Stop words often useless for dedup
+# =========================================================
+
+GENERIC_BUSINESS_WORDS = {
+    "international",
+    "global",
+    "services",
+    "solutions",
+    "systems"
+}
+
+
+# =========================================================
+# Token-level replacements
+# =========================================================
+
+TOKEN_REPLACEMENTS = {
+
+    # Common morphology simplification
+    "technologies": "technology",
+    "solutions": "solution",
+    "systems": "system",
+    "logistics": "logistic",
+
+    # Normalize ampersands
+    "&": "and",
+}
+
+
+# =========================================================
+# Main normalization function
+# =========================================================
+
 def normalize_text(text: str) -> str:
-    """Normalize text for consistent search and comparison.
+    """
+    Advanced normalization for entity deduplication.
 
-    Performs unicode normalization, transliteration to ASCII,
-    lowercasing, punctuation removal, and whitespace cleanup.
+    Steps:
+        1. Unicode normalization
+        2. Transliteration
+        3. Lowercase
+        4. Remove punctuation
+        5. Token cleanup
+        6. Remove legal suffixes
+        7. Remove duplicates
+        8. Sort tokens (optional but powerful)
 
-    Args:
-        text (str): Source text to normalize.
+    Example:
 
-    Returns:
-        str: Normalized text string.
+        "Vistula Logistics Solutions Sp. z o.o."
+
+    becomes:
+
+        "logistic solution vistula"
     """
 
-    if text is None:
+    if not text:
         return ""
 
+
+    # =====================================================
     # Unicode normalization
+    # =====================================================
+
     text = unicodedata.normalize("NFKC", text)
 
-    # Transliteration
+
+    # =====================================================
+    # Transliteration to ASCII
+    # =====================================================
+
     text = unidecode(text)
 
+
+    # =====================================================
     # Lowercase
+    # =====================================================
+
     text = text.lower()
 
+
+    # =====================================================
+    # Replace special symbols
+    # =====================================================
+
+    text = text.replace("&", " and ")
+
+
+    # =====================================================
     # Remove punctuation
+    # =====================================================
+
     text = re.sub(r"[^\w\s]", " ", text)
 
-    # Remove extra spaces
-    text = re.sub(r"\s+", " ", text)
 
-    return text.strip()
+    # =====================================================
+    # Remove numbers-only tokens
+    #
+    # Optional:
+    # remove if numbers are not meaningful
+    # =====================================================
+
+    text = re.sub(r"\b\d+\b", " ", text)
+
+
+    # =====================================================
+    # Collapse spaces
+    # =====================================================
+
+    text = re.sub(r"\s+", " ", text).strip()
+
+
+    # =====================================================
+    # Split into tokens
+    # =====================================================
+
+    tokens = text.split()
+
+
+    # =====================================================
+    # Apply token replacements
+    # =====================================================
+
+    normalized_tokens = []
+
+    for token in tokens:
+
+        token = TOKEN_REPLACEMENTS.get(token, token)
+
+        normalized_tokens.append(token)
+
+    tokens = normalized_tokens
+
+
+    # =====================================================
+    # Remove company suffixes
+    # =====================================================
+
+    tokens = [
+        t for t in tokens
+        if t not in COMPANY_SUFFIXES
+    ]
+
+
+    # =====================================================
+    # Remove very short tokens
+    #
+    # Prevent noise:
+    # "x", "a", "1"
+    # =====================================================
+
+    tokens = [
+        t for t in tokens
+        if len(t) > 1
+    ]
+
+
+    # =====================================================
+    # Remove duplicated tokens
+    #
+    # Example:
+    # "solution solution"
+    # =====================================================
+
+    tokens = list(set(tokens))
+
+
+    # =====================================================
+    # Sort tokens
+    #
+    # HUGE improvement for:
+    #
+    # "Apple iPhone"
+    # "iPhone Apple"
+    # =====================================================
+
+    tokens.sort()
+
+
+    # =====================================================
+    # Final normalized string
+    # =====================================================
+
+    return " ".join(tokens)
 
 
 def build_analysis_records(

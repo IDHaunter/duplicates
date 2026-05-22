@@ -147,7 +147,7 @@ labels, distances = index.knn_query(
 # 11. Duplicate detection
 # =========================================================
 
-SIMILARITY_THRESHOLD = 0.88
+SIMILARITY_THRESHOLD = 0.7
 
 duplicate_candidates = []
 
