@@ -95,9 +95,23 @@ TOKEN_REPLACEMENTS = {
 # Main normalization function
 # =========================================================
 
-def normalize_text(text: str) -> str:
+def normalize_text(text: str, sort_tokens: bool = True) -> str:
     """
     Advanced normalization for entity deduplication.
+
+    Args:
+        text:
+            Input text to normalize.
+
+        sort_tokens:
+            If True (default), tokens are alphabetically sorted.
+            Useful for entity deduplication where token order
+            should not matter.
+
+            Example:
+                "Apple iPhone" == "iPhone Apple"
+
+            If False, original token order is preserved.
 
     Steps:
         1. Unicode normalization
@@ -107,7 +121,7 @@ def normalize_text(text: str) -> str:
         5. Token cleanup
         6. Remove legal suffixes
         7. Remove duplicates
-        8. Sort tokens (optional but powerful)
+        8. Sort tokens (optional)
 
     Example:
 
@@ -121,13 +135,11 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
 
-
     # =====================================================
     # Unicode normalization
     # =====================================================
 
     text = unicodedata.normalize("NFKC", text)
-
 
     # =====================================================
     # Transliteration to ASCII
@@ -135,13 +147,11 @@ def normalize_text(text: str) -> str:
 
     text = unidecode(text)
 
-
     # =====================================================
     # Lowercase
     # =====================================================
 
     text = text.lower()
-
 
     # =====================================================
     # Replace special symbols
@@ -149,13 +159,11 @@ def normalize_text(text: str) -> str:
 
     text = text.replace("&", " and ")
 
-
     # =====================================================
     # Remove punctuation
     # =====================================================
 
-    text = re.sub(r"[^\w\s]", " ", text)
-
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
 
     # =====================================================
     # Remove numbers-only tokens
@@ -166,20 +174,17 @@ def normalize_text(text: str) -> str:
 
     text = re.sub(r"\b\d+\b", " ", text)
 
-
     # =====================================================
     # Collapse spaces
     # =====================================================
 
     text = re.sub(r"\s+", " ", text).strip()
 
-
     # =====================================================
     # Split into tokens
     # =====================================================
 
     tokens = text.split()
-
 
     # =====================================================
     # Apply token replacements
@@ -195,7 +200,6 @@ def normalize_text(text: str) -> str:
 
     tokens = normalized_tokens
 
-
     # =====================================================
     # Remove company suffixes
     # =====================================================
@@ -204,7 +208,6 @@ def normalize_text(text: str) -> str:
         t for t in tokens
         if t not in COMPANY_SUFFIXES
     ]
-
 
     # =====================================================
     # Remove very short tokens
@@ -218,19 +221,19 @@ def normalize_text(text: str) -> str:
         if len(t) > 1
     ]
 
-
     # =====================================================
     # Remove duplicated tokens
+    #
+    # Keeps original order
     #
     # Example:
     # "solution solution"
     # =====================================================
 
-    tokens = list(set(tokens))
-
+    tokens = list(dict.fromkeys(tokens))
 
     # =====================================================
-    # Sort tokens
+    # Sort tokens (optional)
     #
     # HUGE improvement for:
     #
@@ -238,8 +241,8 @@ def normalize_text(text: str) -> str:
     # "iPhone Apple"
     # =====================================================
 
-    tokens.sort()
-
+    if sort_tokens:
+        tokens.sort()
 
     # =====================================================
     # Final normalized string

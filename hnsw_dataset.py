@@ -1,6 +1,14 @@
 import json
+import time
+import logging
+
+from dataclasses import dataclass
+from functools import wraps
+from typing import Any, Callable
+
 import pandas as pd
 import hnswlib
+import numpy as np
 
 from sentence_transformers import SentenceTransformer
 
@@ -8,274 +16,554 @@ from dataset_processor import build_analysis_records
 
 
 # =========================================================
-# 1. Load real data
+# LOGGING
 # =========================================================
 
-with open("./datasets/kna1.json", "r", encoding="utf-8") as f:
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-    raw_data = json.load(f)
+logger = logging.getLogger(__name__)
 
-    records = build_analysis_records(
+
+# =========================================================
+# TIMING DECORATOR
+# =========================================================
+
+def timed(func: Callable) -> Callable:
+    """Measure execution time of a function.
+
+    Logs execution time of the wrapped function using the global logger.
+
+    Args:
+        func (Callable): Function to wrap.
+
+    Returns:
+        Callable: Wrapped function with execution time logging.
+    """
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+
+        start: float = time.perf_counter()
+
+        result: Any = func(*args, **kwargs)
+
+        elapsed: float = time.perf_counter() - start
+
+        logger.info(
+            f"[TIME] {func.__name__} -> {elapsed:.4f} sec"
+        )
+
+        return result
+
+    return wrapper
+
+
+# =========================================================
+# DATA CLASSES
+# =========================================================
+
+@dataclass
+class DuplicateCandidate:
+    """Represent a duplicate candidate pair."""
+
+    source_pk: str
+    target_pk: str
+
+    source_original: str
+    target_original: str
+
+    source_normalized: str
+    target_normalized: str
+
+    similarity: float
+
+
+# =========================================================
+# LOAD DATA
+# =========================================================
+
+@timed
+def load_records(path: str) -> list[dict[str, Any]]:
+    """Load and preprocess source records from JSON file.
+
+    Reads raw JSON data and converts it into analysis records
+    using the dataset processor.
+
+    Args:
+        path (str): Path to source JSON file.
+
+    Returns:
+        list[dict[str, Any]]: List of processed analysis records.
+    """
+
+    with open(path, "r", encoding="utf-8") as f:
+
+        raw_data: list[dict[str, Any]] = json.load(f)
+
+    records: list[dict[str, Any]] = build_analysis_records(
         data=raw_data,
         key_fields=["mandt", "kunnr"],
         analysis_fields=["name1"]
     )
 
-print(json.dumps(records, indent=4))
-
-# =========================================================
-# records example:
-#
-# {
-#     "pk_source": "800|0000000001",
-#     "fields_source": "Patron Automotive",
-#     "fields_normalized": "patron automotive"
-# }
-# =========================================================
+    return records
 
 
 # =========================================================
-# 2. Convert to DataFrame
+# CREATE DATAFRAME
 # =========================================================
 
-df = pd.DataFrame(records)
+@timed
+def create_dataframe(
+    records: list[dict[str, Any]]
+) -> pd.DataFrame:
+    """Create DataFrame with internal identifiers.
 
-print(df.head())
+    Converts analysis records into a pandas DataFrame and
+    assigns sequential internal identifiers.
 
+    Args:
+        records (list[dict[str, Any]]): Source analysis records.
 
-# =========================================================
-# 3. Create internal integer ids
-#
-# HNSW works best with integer ids
-# =========================================================
+    Returns:
+        pd.DataFrame: DataFrame with internal_id column.
+    """
 
-df["internal_id"] = range(len(df))
+    df: pd.DataFrame = pd.DataFrame(records)
 
+    df["internal_id"] = range(len(df))
 
-# =========================================================
-# 4. Create mappings
-# =========================================================
-
-internal_to_pk = dict(
-    zip(df["internal_id"], df["pk_source"])
-)
-
-pk_to_internal = dict(
-    zip(df["pk_source"], df["internal_id"])
-)
+    return df
 
 
 # =========================================================
-# 5. Load embedding model
+# LOAD MODEL
 # =========================================================
 
-model = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2"
-)
+@timed
+def load_model(model_name: str) -> SentenceTransformer:
+    """Load sentence transformer model.
 
+    Args:
+        model_name (str): HuggingFace model name.
 
-# =========================================================
-# 6. Generate embeddings
-#
-# IMPORTANT:
-# We use normalized text for embeddings
-# =========================================================
+    Returns:
+        SentenceTransformer: Loaded embedding model.
+    """
 
-texts = df["fields_normalized"].tolist()
-
-embeddings = model.encode(
-    texts,
-    normalize_embeddings=True,
-    show_progress_bar=True
-)
-
-print("Embeddings shape:", embeddings.shape)
+    return SentenceTransformer(model_name)
 
 
 # =========================================================
-# 7. Create HNSW index
+# GENERATE EMBEDDINGS
 # =========================================================
 
-dim = embeddings.shape[1]
+@timed
+def generate_embeddings(
+    model: SentenceTransformer,
+    texts: list[str]
+) -> np.ndarray:
+    """Generate normalized embeddings for input texts.
 
-index = hnswlib.Index(
-    space='cosine',
-    dim=dim
-)
+    Args:
+        model (SentenceTransformer): Embedding model.
+        texts (list[str]): Source texts.
 
-index.init_index(
-    max_elements=len(df),
-    ef_construction=200,
-    M=16
-)
+    Returns:
+        np.ndarray: Embedding matrix.
+    """
 
+    embeddings: np.ndarray = model.encode(
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=True
+    )
 
-# =========================================================
-# 8. Add vectors into HNSW
-# =========================================================
+    logger.info(
+        f"Embeddings shape: {embeddings.shape}"
+    )
 
-index.add_items(
-    embeddings,
-    df["internal_id"].tolist()
-)
-
-
-# =========================================================
-# 9. Search quality
-#
-# Higher ef:
-#   better recall
-#   slower search
-# =========================================================
-
-index.set_ef(50)
+    return embeddings
 
 
 # =========================================================
-# 10. Find nearest neighbors
+# BUILD HNSW INDEX
 # =========================================================
 
-K = 5
+@timed
+def build_hnsw_index(
+    embeddings: np.ndarray,
+    internal_ids: list[int],
+    ef_construction: int = 200,
+    M: int = 16,
+    ef_search: int = 50
+) -> hnswlib.Index:
+    """Build and populate HNSW index.
 
-labels, distances = index.knn_query(
-    embeddings,
-    k=K
-)
+    Args:
+        embeddings (np.ndarray): Embedding matrix.
+        internal_ids (list[int]): Vector identifiers.
+        ef_construction (int): Construction accuracy parameter.
+        M (int): Graph connectivity parameter.
+        ef_search (int): Search accuracy parameter.
+
+    Returns:
+        hnswlib.Index: Initialized HNSW index.
+    """
+
+    dim: int = embeddings.shape[1]
+
+    index: hnswlib.Index = hnswlib.Index(
+        space="cosine",
+        dim=dim
+    )
+
+    index.init_index(
+        max_elements=len(internal_ids),
+        ef_construction=ef_construction,
+        M=M
+    )
+
+    index.add_items(
+        embeddings,
+        internal_ids
+    )
+
+    index.set_ef(ef_search)
+
+    return index
 
 
 # =========================================================
-# 11. Duplicate detection
+# SEARCH NEIGHBORS
 # =========================================================
 
-SIMILARITY_THRESHOLD = 0.7
+@timed
+def search_neighbors(
+    index: hnswlib.Index,
+    embeddings: np.ndarray,
+    k: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Search nearest neighbors in HNSW index.
 
-duplicate_candidates = []
+    Args:
+        index (hnswlib.Index): HNSW index.
+        embeddings (np.ndarray): Query embeddings.
+        k (int): Number of neighbors.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]:
+            Neighbor labels and distances.
+    """
+
+    labels: np.ndarray
+    distances: np.ndarray
+
+    labels, distances = index.knn_query(
+        embeddings,
+        k=k
+    )
+
+    return labels, distances
 
 
 # =========================================================
-# Iterate through all source rows
+# BUILD ROW LOOKUP
 # =========================================================
 
-for row_idx, source_internal_id in enumerate(df["internal_id"]):
+@timed
+def build_row_lookup(
+    df: pd.DataFrame
+) -> dict[int, pd.Series]:
+    """Create fast row lookup dictionary.
 
-    source_row = df.iloc[row_idx]
+    Avoids expensive DataFrame filtering during duplicate search.
 
-    source_pk = source_row["pk_source"]
+    Args:
+        df (pd.DataFrame): Source DataFrame.
 
-    source_original = source_row["fields_source"]
+    Returns:
+        dict[int, pd.Series]:
+            Mapping internal_id -> DataFrame row.
+    """
 
-    source_normalized = source_row["fields_normalized"]
+    return {
+        row["internal_id"]: row
+        for _, row in df.iterrows()
+    }
 
+
+# =========================================================
+# DETECT DUPLICATES
+# =========================================================
+
+@timed
+def detect_duplicates(
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    distances: np.ndarray,
+    rows_by_internal_id: dict[int, pd.Series],
+    similarity_threshold: float = 0.7,
+    k: int = 5
+) -> list[dict[str, Any]]:
+    """Detect duplicate candidates using nearest neighbors.
+
+    Compares nearest neighbor pairs and filters them by
+    similarity threshold.
+
+    Args:
+        df (pd.DataFrame): Source DataFrame.
+        labels (np.ndarray): Neighbor labels.
+        distances (np.ndarray): Neighbor distances.
+        rows_by_internal_id (dict[int, pd.Series]):
+            Fast row lookup dictionary.
+        similarity_threshold (float):
+            Minimum similarity threshold.
+        k (int): Number of neighbors.
+
+    Returns:
+        list[dict[str, Any]]:
+            List of duplicate candidate records.
+    """
+
+    duplicate_candidates: list[dict[str, Any]] = []
+
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for row_idx, source_internal_id in enumerate(df["internal_id"]):
+
+        source_row: pd.Series = rows_by_internal_id[
+            source_internal_id
+        ]
+
+        source_pk: str = source_row["pk_source"]
+
+        for neighbor_pos in range(k):
+
+            target_internal_id: int = labels[row_idx][neighbor_pos]
+
+            distance: float = distances[row_idx][neighbor_pos]
+
+            similarity: float = 1 - distance
+
+            # =============================================
+            # Skip self-match
+            # =============================================
+
+            if source_internal_id == target_internal_id:
+                continue
+
+            # =============================================
+            # Apply threshold
+            # =============================================
+
+            if similarity < similarity_threshold:
+                continue
+
+            target_row: pd.Series = rows_by_internal_id[
+                target_internal_id
+            ]
+
+            target_pk: str = target_row["pk_source"]
+
+            # =============================================
+            # Avoid reverse duplicates
+            # =============================================
+
+            pair_key: tuple[str, str]
+
+            if source_pk < target_pk:
+                pair_key = (source_pk, target_pk)
+            else:
+                pair_key = (target_pk, source_pk)
+
+            if pair_key in seen_pairs:
+                continue
+
+            seen_pairs.add(pair_key)
+
+            candidate: DuplicateCandidate = DuplicateCandidate(
+                source_pk=source_pk,
+                target_pk=target_pk,
+
+                source_original=source_row["fields_source"],
+                target_original=target_row["fields_source"],
+
+                source_normalized=source_row["fields_normalized"],
+                target_normalized=target_row["fields_normalized"],
+
+                similarity=round(float(similarity), 4)
+            )
+
+            duplicate_candidates.append(
+                candidate.__dict__
+            )
+
+    return duplicate_candidates
+
+
+# =========================================================
+# CREATE RESULT DATAFRAME
+# =========================================================
+
+@timed
+def create_duplicates_dataframe(
+    duplicate_candidates: list[dict[str, Any]]
+) -> pd.DataFrame:
+    """Create sorted duplicate candidates DataFrame.
+
+    Args:
+        duplicate_candidates (list[dict[str, Any]]):
+            Duplicate candidate records.
+
+    Returns:
+        pd.DataFrame:
+            Sorted duplicate candidates DataFrame.
+    """
+
+    duplicates_df: pd.DataFrame = pd.DataFrame(
+        duplicate_candidates
+    )
+
+    if duplicates_df.empty:
+        return duplicates_df
+
+    duplicates_df = duplicates_df.sort_values(
+        by="similarity",
+        ascending=False
+    )
+
+    return duplicates_df
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+@timed
+def main() -> None:
+    """Execute duplicate detection pipeline."""
 
     # =====================================================
-    # Iterate through neighbors
+    # Load records
     # =====================================================
 
-    for neighbor_pos in range(K):
+    records: list[dict[str, Any]] = load_records(
+        "./datasets/kna1.json"
+    )
 
-        target_internal_id = labels[row_idx][neighbor_pos]
+    logger.info(
+        f"Loaded records: {len(records)}"
+    )
 
-        distance = distances[row_idx][neighbor_pos]
+    # =====================================================
+    # DataFrame
+    # =====================================================
 
-        similarity = 1 - distance
+    df: pd.DataFrame = create_dataframe(records)
 
+    # =====================================================
+    # Model
+    # =====================================================
 
-        # =================================================
-        # Skip self-match
-        # =================================================
+    model: SentenceTransformer = load_model(
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-        if source_internal_id == target_internal_id:
-            continue
+    # =====================================================
+    # Embeddings
+    # =====================================================
 
+    texts: list[str] = df[
+        "fields_normalized"
+    ].tolist()
 
-        # =================================================
-        # Apply similarity threshold
-        # =================================================
+    embeddings: np.ndarray = generate_embeddings(
+        model,
+        texts
+    )
 
-        if similarity < SIMILARITY_THRESHOLD:
-            continue
+    # =====================================================
+    # HNSW
+    # =====================================================
 
+    index: hnswlib.Index = build_hnsw_index(
+        embeddings,
+        df["internal_id"].tolist() # ids which used as labels
+    )
 
-        # =================================================
-        # Get target row
-        # =================================================
+    # =====================================================
+    # KNN Search
+    # =====================================================
 
-        target_row = df[
-            df["internal_id"] == target_internal_id
-        ].iloc[0]
+    neighbors_count: int = 5
 
-        target_pk = target_row["pk_source"]
+    labels: np.ndarray      # [[0 11  3 13 14], ... ]
+    distances: np.ndarray   # [[-3.5762787e-07  6.2004298e-01  6.3889337e-01  7.6401603e-01   7.6401603e-01], ... ]
 
-        target_original = target_row["fields_source"]
+    labels, distances = search_neighbors(
+        index,
+        embeddings,
+        k=neighbors_count
+    )
 
-        target_normalized = target_row["fields_normalized"]
+    # =====================================================
+    # Fast lookup
+    # =====================================================
 
+    rows_by_internal_id: dict[int, pd.Series]
 
-        # =================================================
-        # Avoid duplicate reverse pairs
-        #
-        # (A,B) == (B,A)
-        # =================================================
+    rows_by_internal_id = build_row_lookup(df)
 
-        pair_key = tuple(
-            sorted([source_pk, target_pk])
+    # =====================================================
+    # Duplicate detection
+    # =====================================================
+
+    duplicate_candidates: list[dict[str, Any]]
+
+    duplicate_candidates = detect_duplicates(
+        df=df,
+        labels=labels,
+        distances=distances,
+        rows_by_internal_id=rows_by_internal_id,
+        similarity_threshold=0.7,
+        k=neighbors_count
+    )
+
+    # =====================================================
+    # Result DataFrame
+    # =====================================================
+
+    duplicates_df: pd.DataFrame
+
+    duplicates_df = create_duplicates_dataframe(
+        duplicate_candidates
+    )
+
+    # =====================================================
+    # Output
+    # =====================================================
+
+    print("\n================ DUPLICATE CANDIDATES ================\n")
+
+    if duplicates_df.empty:
+
+        print("No duplicates found")
+
+    else:
+
+        print(
+            duplicates_df.to_string(index=False)
         )
 
 
-        duplicate_candidates.append({
-            "pair_key": pair_key,
-
-            "source_pk": source_pk,
-            "target_pk": target_pk,
-
-            "source_original": source_original,
-            "target_original": target_original,
-
-            "source_normalized": source_normalized,
-            "target_normalized": target_normalized,
-
-            "similarity": round(float(similarity), 4)
-        })
-
-
 # =========================================================
-# 12. Convert to DataFrame
+# ENTRYPOINT
 # =========================================================
 
-duplicates_df = pd.DataFrame(
-    duplicate_candidates
-)
+if __name__ == "__main__":
 
-
-# =========================================================
-# 13. Remove duplicate reverse pairs
-# =========================================================
-
-duplicates_df = duplicates_df.drop_duplicates(
-    subset=["pair_key"]
-)
-
-duplicates_df = duplicates_df.drop(
-    columns=["pair_key"]
-)
-
-
-# =========================================================
-# 14. Sort by similarity
-# =========================================================
-
-duplicates_df = duplicates_df.sort_values(
-    by="similarity",
-    ascending=False
-)
-
-
-# =========================================================
-# 15. Output results
-# =========================================================
-
-print("\n================ DUPLICATE CANDIDATES ================\n")
-
-print(
-    duplicates_df.to_string(index=False)
-)
+    main()
